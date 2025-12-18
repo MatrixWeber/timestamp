@@ -5,6 +5,7 @@ from openpyxl import Workbook, load_workbook
 import calendar
 import requests
 from openpyxl.styles import PatternFill
+from openpyxl.formatting.rule import FormulaRule
 
 TAGES_SOLL_STUNDEN = 8
 PAUSE_IN_STUNDEN = 0.75
@@ -12,7 +13,7 @@ PAUSE_IN_STUNDEN = 0.75
 weekday_names = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag']
 feiertage_filter = ['08-08', '08-15', '11-19']
 
-year = datetime.datetime.now().year
+year = 2026
 # URL der API
 url = f"https://feiertage-api.de/api/?jahr={year}&nur_land=BY"
 
@@ -46,7 +47,19 @@ if "Sheet" in wb.sheetnames:
 # Füge die Summen der Monate in die Übersicht ein
 uebersicht_ws = wb["Übersicht"]
 
-# Schreibe die Kopfzeile in die Übersicht (inklusive der neuen Spalten für Abwesenheiten)
+# Übertrag aus Vorjahr ermitteln
+uebertrag_vorjahr = 0
+if existing_wb and "Übersicht" in existing_wb.sheetnames:
+    prev_overview = existing_wb["Übersicht"]
+    for r in range(prev_overview.max_row, 0, -1):
+        label = prev_overview.cell(row=r, column=1).value
+        if label and str(label).lower().startswith("sum"):
+            val = prev_overview.cell(row=r, column=4).value
+            if isinstance(val, (int, float)):
+                uebertrag_vorjahr = val
+            break
+
+# Schreibe die Kopfzeile in die Übersicht
 uebersicht_ws.append(["Monat", "Summe Soll", "Summe Arbeitszeit", "Summe Überstunden", "Urlaub", "Krank", "Dienstreise", "Gleittage"])
 
 # Variable zur Speicherung der Überstunden des Vormonats
@@ -56,6 +69,9 @@ ueberstunden_vormonat = 0
 grey_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")  # Grau für Wochenende
 pink_fill = PatternFill(start_color="FFC0CB", end_color="FFC0CB", fill_type="solid")  # Rosa für Feiertage
 turquoise_fill = PatternFill(start_color="40E0D0", end_color="40E0D0", fill_type="solid")  # Türkis für Urlaub
+krank_fill = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")  # Hellgelb für Krank
+gleittag_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")  # Hellgrün für Gleittag
+dienstreise_fill = PatternFill(start_color="ADD8E6", end_color="ADD8E6", fill_type="solid")  # Hellblau für Dienstreise
 
 # Iteriere über alle Monate des aktuellen Jahres
 for month in range(1, 13):
@@ -63,7 +79,7 @@ for month in range(1, 13):
     df = pd.DataFrame(columns=['Datum', 'Tag', 'Gekommen', 'Gehzeit', 'Pause', 'Arbeitszeit', 'Soll', 'Überstunden'])
 
     # Bestimme die Anzahl der Tage im aktuellen Monat
-    num_days = calendar.monthrange(datetime.datetime.now().year, month)[1]
+    num_days = calendar.monthrange(year, month)[1]
 
     # Lese vorhandene Einträge aus bestehender Datei, um manuelle Zeiten zu erhalten
     existing_rows = {}
@@ -90,7 +106,7 @@ for month in range(1, 13):
             }
 
     # Iteriere über alle Tage des aktuellen Monats
-    for day in pd.date_range(start=f'{datetime.datetime.now().year}-{month:02d}-01', end=f'{datetime.datetime.now().year}-{month:02d}-{num_days}'):
+    for day in pd.date_range(start=f'{year}-{month:02d}-01', end=f'{year}-{month:02d}-{num_days}'):
         day_is_holiday = False
         for feiertag in feiertage:
             if feiertag == day._date_repr:
@@ -184,7 +200,7 @@ for month in range(1, 13):
             # Färbe die Zeile entsprechend
             if row[1]['Tag'] in ['Samstag', 'Sonntag']:
                 cell.fill = grey_fill  # Grau für Wochenende
-            elif f"{datetime.datetime.now().year}-{month:02d}-{row[1]['Datum']:02d}" in feiertage:
+            elif f"{year}-{month:02d}-{row[1]['Datum']:02d}" in feiertage:
                 cell.fill = pink_fill  # Rosa für Feiertage
 
     # Füge Formeln für Arbeitszeit, Summe Soll, Summe Ist und Überstunden hinzu
@@ -202,6 +218,13 @@ for month in range(1, 13):
     ws[f'F{last_row}'] = f'=SUM(F2:F{last_row - 1})' # Summe Arbeitszeit
     ws[f'G{last_row}'] = f'=SUM(G2:G{last_row - 1})' # Summe Soll
     ws[f'H{last_row}'] = f'=SUM(H2:H{last_row - 1})' # Summe Überstunden
+
+    # Dynamische Einfärbung nach Kürzeln in Spalte C
+    data_range = f"A2:H{last_row - 1}"
+    ws.conditional_formatting.add(data_range, FormulaRule(formula=["$C2=\"U\""], fill=turquoise_fill))
+    ws.conditional_formatting.add(data_range, FormulaRule(formula=["$C2=\"G\""], fill=gleittag_fill))
+    ws.conditional_formatting.add(data_range, FormulaRule(formula=["$C2=\"K\""], fill=krank_fill))
+    ws.conditional_formatting.add(data_range, FormulaRule(formula=["$C2=\"D\""], fill=dienstreise_fill))
 
     # Entferne alte Summenanzeigen für Urlaub und Gleittage in den Spalten C und D
     ws[f'C{last_row}'] = None
@@ -251,6 +274,34 @@ uebersicht_ws[f'E{last_row_uebersicht}'] = f'=SUM(E2:E{last_row_uebersicht - 1})
 uebersicht_ws[f'F{last_row_uebersicht}'] = f'=SUM(F2:F{last_row_uebersicht - 1})'  # Summe Kranktage
 uebersicht_ws[f'G{last_row_uebersicht}'] = f'=SUM(G2:G{last_row_uebersicht - 1})'  # Summe Dienstreisen
 uebersicht_ws[f'H{last_row_uebersicht}'] = f'=SUM(H2:H{last_row_uebersicht - 1})'  # Summe Gleittage
+
+# Füge Übertrag Vorjahr Zeile hinzu
+last_row_uebersicht += 1
+uebersicht_ws[f'A{last_row_uebersicht}'] = "Übertrag Vorjahr"
+uebersicht_ws[f'D{last_row_uebersicht}'] = uebertrag_vorjahr  # Überstunden VJ
+# Ermittle Urlaubs-Übertrag aus Vorjahr
+uebertrag_urlaub_vj = 0
+if existing_wb and "Übersicht" in existing_wb.sheetnames:
+    prev_overview = existing_wb["Übersicht"]
+    for r in range(prev_overview.max_row, 0, -1):
+        label = prev_overview.cell(row=r, column=1).value
+        if label and ("trag" in str(label).lower() or label == "Übertrag Vorjahr"):
+            val = prev_overview.cell(row=r, column=5).value
+            if isinstance(val, (int, float)):
+                uebertrag_urlaub_vj = val
+            break
+uebersicht_ws[f'E{last_row_uebersicht}'] = uebertrag_urlaub_vj  # Urlaub VJ
+
+# Füge Gesamtsumme Zeile hinzu
+last_row_uebersicht += 1
+uebersicht_ws[f'A{last_row_uebersicht}'] = "Gesamtsumme"
+uebersicht_ws[f'B{last_row_uebersicht}'] = f'=B{last_row_uebersicht - 2}'  # Summe Soll (gleich wie Summen)
+uebersicht_ws[f'C{last_row_uebersicht}'] = f'=C{last_row_uebersicht - 2}'  # Summe Arbeitszeit (gleich wie Summen)
+uebersicht_ws[f'D{last_row_uebersicht}'] = f'=D{last_row_uebersicht - 2}+D{last_row_uebersicht - 1}'  # Überstunden + Übertrag VJ
+uebersicht_ws[f'E{last_row_uebersicht}'] = f'=E{last_row_uebersicht - 2}-E{last_row_uebersicht - 1}'  # Urlaub + Übertrag VJ
+uebersicht_ws[f'F{last_row_uebersicht}'] = f'=F{last_row_uebersicht - 2}'  # Kranktage (gleich wie Summen)
+uebersicht_ws[f'G{last_row_uebersicht}'] = f'=G{last_row_uebersicht - 2}'  # Dienstreisen (gleich wie Summen)
+uebersicht_ws[f'H{last_row_uebersicht}'] = f'=H{last_row_uebersicht - 2}'  # Gleittage (gleich wie Summen)
 
 # Speichere das Workbook
 wb.save(CALENDAR_FILE)
