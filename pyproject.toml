@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stamp"
+version = "0.1.0"
+description = "Interaktives Zeiterfassungs-Tool"
+requires-python = ">=3.10"
+dependencies = [
+    "typer[all]>=0.9.0",
+    "rich>=13.0.0",
+    "sqlalchemy>=2.0.0",
+    "openpyxl>=3.1.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+]
+notify = [
+    "plyer>=2.1.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+stamp = "stamp.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["stamp*"]

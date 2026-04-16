@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+.pytest_cache/
+
+# Datenbank & Nutzerdaten
+stamp.db
+*.xlsx
+*.xls
+
+# Node / Web
+web/node_modules/
+web/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
