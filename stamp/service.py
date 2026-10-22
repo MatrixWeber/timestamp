@@ -2,9 +2,14 @@
 
 from datetime import date, time, datetime, timedelta
 from typing import Optional
+import hashlib
+import json
+import math
+
+from sqlalchemy import text
 
 from stamp.db import get_session, Stamp, get_config_float, get_config_int
-from stamp.holidays import is_holiday
+from stamp.holidays import is_holiday, fetch_holidays
 
 
 # --- Berechnungen ---
@@ -169,6 +174,17 @@ def edit_stamp(
         return existing
 
 
+def _apply_absence(entry: Stamp, absence_type: str, target: float, note: str | None) -> None:
+    entry.type = absence_type
+    entry.stamp_in = None
+    entry.stamp_out = None
+    entry.pause = 0.0
+    entry.work_hours = target
+    entry.overtime = -target if absence_type == "FLEX" else 0.0
+    entry.note = note
+    entry.updated_at = datetime.now()
+
+
 def add_absence(
     absence_type: str,
     start_date: date,
@@ -185,8 +201,6 @@ def add_absence(
         raise ValueError(f"Ungültiger Typ: {absence_type}. Erlaubt: {valid_types}")
 
     target = get_config_float("target_hours")
-    # Gleittag (FLEX) verbraucht Überstunden (-target), alle anderen Abwesenheiten sind neutral
-    absence_overtime = -target if absence_type == "FLEX" else 0.0
     entries = []
     current = start_date
 
@@ -194,25 +208,10 @@ def add_absence(
         while current <= end_date:
             if is_workday(current):
                 existing = session.query(Stamp).filter_by(date=current).first()
-                if existing:
-                    existing.type = absence_type
-                    existing.stamp_in = None
-                    existing.stamp_out = None
-                    existing.pause = 0.0
-                    existing.work_hours = target
-                    existing.overtime = absence_overtime
-                    existing.note = note
-                    existing.updated_at = datetime.now()
-                else:
-                    existing = Stamp(
-                        date=current,
-                        type=absence_type,
-                        pause=0.0,
-                        work_hours=target,
-                        overtime=absence_overtime,
-                        note=note,
-                    )
+                if not existing:
+                    existing = Stamp(date=current)
                     session.add(existing)
+                _apply_absence(existing, absence_type, target, note)
                 entries.append(existing)
             current += timedelta(days=1)
         session.commit()
@@ -220,6 +219,139 @@ def add_absence(
             session.refresh(e)
 
     return entries
+
+
+class BatchConflictError(ValueError):
+    """Die bestaetigte Vorschau stimmt nicht mehr mit dem Datenbestand ueberein."""
+
+
+def _prepare_batch(
+    entry_type: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    dates: list[date] | None = None,
+    stamp_in_time: time | None = None,
+    stamp_out_time: time | None = None,
+    pause: float = 0,
+    note: str | None = None,
+) -> dict:
+    if entry_type not in {"WORK", "VACATION", "SICK", "FLEX", "TRAVEL"}:
+        raise ValueError("Ungueltige Tagesart.")
+    if dates is not None:
+        if start_date is not None or end_date is not None:
+            raise ValueError("Entweder Zeitraum oder einzelne Daten angeben.")
+        selected = sorted(set(dates))
+    else:
+        if start_date is None or end_date is None or end_date < start_date:
+            raise ValueError("Gueltigen Zeitraum von/bis angeben.")
+        selected = [
+            start_date + timedelta(days=i)
+            for i in range((end_date - start_date).days + 1)
+        ]
+    if not selected:
+        raise ValueError("Mindestens einen Tag auswaehlen.")
+    if entry_type == "WORK":
+        if stamp_in_time is None or stamp_out_time is None or stamp_out_time <= stamp_in_time:
+            raise ValueError("Kommen und Gehen angeben; Gehen muss nach Kommen liegen.")
+        if not math.isfinite(pause) or pause < 0:
+            raise ValueError("Die Pause muss eine nichtnegative Minutenzahl sein.")
+        duration = (
+            datetime.combine(date.today(), stamp_out_time)
+            - datetime.combine(date.today(), stamp_in_time)
+        ).total_seconds() / 60
+        if pause >= duration:
+            raise ValueError("Die Pause muss kuerzer als die Anwesenheit sein.")
+    else:
+        stamp_in_time, stamp_out_time, pause = None, None, 0
+
+    holidays = {
+        h.date: h.name
+        for year in sorted({d.year for d in selected})
+        for h in fetch_holidays(year, strict=True)
+    }
+    applicable, skipped = [], []
+    for day in selected:
+        if day.weekday() >= 5 or day in holidays:
+            skipped.append({
+                "date": day,
+                "reason": holidays.get(day, "Wochenende"),
+            })
+        else:
+            applicable.append(day)
+    if not applicable:
+        raise ValueError("Die Auswahl enthaelt keine Arbeitstage.")
+    return {
+        "dates": applicable, "skipped": skipped, "type": entry_type,
+        "stamp_in": stamp_in_time, "stamp_out": stamp_out_time,
+        "pause": pause / 60, "note": note or None,
+        "target": get_config_float("target_hours"),
+    }
+
+
+def _batch_preview(session, batch: dict) -> tuple[dict, dict[date, Stamp]]:
+    # Query by interval to avoid SQLite's parameter limit for long selections.
+    selected = set(batch["dates"])
+    existing = {
+        e.date: e for e in session.query(Stamp).filter(
+            Stamp.date >= batch["dates"][0], Stamp.date <= batch["dates"][-1]
+        ).order_by(Stamp.date).all() if e.date in selected
+    }
+    snapshot = [
+        {column.name: getattr(e, column.name) for column in Stamp.__table__.columns}
+        for e in existing.values()
+    ]
+    token = hashlib.sha256(json.dumps(
+        {"batch": batch, "existing": snapshot}, default=str, sort_keys=True
+    ).encode()).hexdigest()
+    return {
+        "dates": batch["dates"], "skipped": batch["skipped"],
+        "conflicts": list(existing.values()), "preview_token": token,
+    }, existing
+
+
+def preview_batch(**kwargs) -> dict:
+    batch = _prepare_batch(**kwargs)
+    with get_session() as session:
+        preview, _ = _batch_preview(session, batch)
+        return preview
+
+
+def save_batch(*, preview_token: str, overwrite: bool = False, **kwargs) -> dict:
+    batch = _prepare_batch(**kwargs)
+    with get_session() as session:
+        # SQLite write reservation prevents a change between conflict check and write.
+        session.execute(text("BEGIN IMMEDIATE"))
+        preview, existing = _batch_preview(session, batch)
+        if preview["preview_token"] != preview_token:
+            raise BatchConflictError("Eintraege oder Eingaben wurden geaendert. Bitte Vorschau erneut laden.")
+        if existing and not overwrite:
+            raise BatchConflictError("Vorhandene Eintraege muessen ausdruecklich zum Ueberschreiben bestaetigt werden.")
+        entries = []
+        for day in batch["dates"]:
+            entry = existing.get(day)
+            if entry is None:
+                entry = Stamp(date=day)
+                session.add(entry)
+            if batch["type"] == "WORK":
+                entry.type = "WORK"
+                entry.stamp_in = batch["stamp_in"]
+                entry.stamp_out = batch["stamp_out"]
+                entry.pause = batch["pause"]
+                entry.work_hours = calculate_work_hours(entry.stamp_in, entry.stamp_out, entry.pause)
+                entry.overtime = calculate_overtime(entry.work_hours, batch["target"])
+                entry.note = batch["note"]
+                entry.updated_at = datetime.now()
+            else:
+                _apply_absence(entry, batch["type"], batch["target"], batch["note"])
+            entries.append(entry)
+        session.flush()
+        # Keep the committed response independent of subsequent writers.
+        session.expunge_all()
+        session.commit()
+        return {
+            "created": len(entries) - len(existing), "replaced": len(existing),
+            "skipped": batch["skipped"], "entries": entries,
+        }
 
 
 def cancel_entry(for_date: date) -> bool:

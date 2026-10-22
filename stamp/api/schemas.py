@@ -1,8 +1,8 @@
 """Pydantic-Schemas für die API."""
 
 from datetime import date, time
-from typing import Optional
-from pydantic import BaseModel
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
 
 
 class StampResponse(BaseModel):
@@ -77,3 +77,38 @@ class DayInfo(BaseModel):
     holiday_name: Optional[str] = None
     is_weekend: bool
     stamp: Optional[StampResponse] = None
+
+
+class BatchRequest(BaseModel):
+    type: Literal["WORK", "VACATION", "SICK", "FLEX", "TRAVEL"]
+    start_date: date | None = None
+    end_date: date | None = None
+    dates: list[date] | None = None
+    stamp_in: time | None = None
+    stamp_out: time | None = None
+    pause: float = Field(default=0, ge=0, allow_inf_nan=False)  # Minuten
+    note: str | None = None
+
+
+class BatchSaveRequest(BatchRequest):
+    preview_token: str = Field(min_length=64, max_length=64)
+    overwrite: bool = False
+
+
+class SkippedDay(BaseModel):
+    date: date
+    reason: str
+
+
+class BatchPreviewResponse(BaseModel):
+    dates: list[date]
+    skipped: list[SkippedDay]
+    conflicts: list[StampResponse]
+    preview_token: str
+
+
+class BatchSaveResponse(BaseModel):
+    created: int
+    replaced: int
+    skipped: list[SkippedDay]
+    entries: list[StampResponse]

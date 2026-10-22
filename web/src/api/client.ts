@@ -1,5 +1,11 @@
 const BASE = '/api';
 
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public detail: unknown) {
+    super(message);
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -7,7 +13,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || 'Request failed');
+    const detail: unknown = err.detail;
+    const message = typeof detail === 'string' ? detail
+      : detail && typeof detail === 'object' && 'message' in detail ? String(detail.message)
+      : Array.isArray(detail) ? detail.map(item => `${item.loc?.slice(1).join('.')}: ${item.msg}`).join('; ')
+      : 'Anfrage fehlgeschlagen';
+    throw new ApiError(message, res.status, detail);
   }
   return res.json();
 }
@@ -84,6 +95,46 @@ export interface ConfigEntry {
   value: string;
 }
 
+export const ENTRY_TYPES = [
+  { value: 'WORK', label: '💼 Arbeit' },
+  { value: 'VACATION', label: '🌴 Urlaub' },
+  { value: 'SICK', label: '🤒 Krank' },
+  { value: 'FLEX', label: '⚡ Gleittag' },
+  { value: 'TRAVEL', label: '✈️ Dienstreise' },
+] as const;
+
+export type EntryType = typeof ENTRY_TYPES[number]['value'];
+
+export interface BatchRequest {
+  type: EntryType;
+  start_date?: string;
+  end_date?: string;
+  dates?: string[];
+  stamp_in?: string;
+  stamp_out?: string;
+  pause?: number;
+  note: string;
+}
+
+export interface SkippedDay {
+  date: string;
+  reason: string;
+}
+
+export interface BatchPreview {
+  dates: string[];
+  skipped: SkippedDay[];
+  conflicts: StampEntry[];
+  preview_token: string;
+}
+
+export interface BatchResult {
+  created: number;
+  replaced: number;
+  skipped: SkippedDay[];
+  entries: StampEntry[];
+}
+
 export const api = {
   getToday: () => request<DayInfo>('/today'),
   getWeek: () => request<WeekData>('/week'),
@@ -93,6 +144,11 @@ export const api = {
   getVacation: () => request<VacationData>('/vacation'),
   getMissing: () => request<{ date: string; weekday: string }[]>('/missing'),
   getConfig: () => request<ConfigEntry[]>('/config'),
+  previewBatch: (data: BatchRequest) => request<BatchPreview>('/stamps/batch/preview', {
+    method: 'POST', body: JSON.stringify(data),
+  }),
+  saveBatch: (data: BatchRequest & { preview_token: string; overwrite: boolean }) =>
+    request<BatchResult>('/stamps/batch', { method: 'POST', body: JSON.stringify(data) }),
 
   stampIn: (time?: string) => request<StampEntry>('/stamp/in', {
     method: 'POST', body: JSON.stringify({ time }),

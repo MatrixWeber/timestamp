@@ -2,6 +2,33 @@
 
 CLI-basierte Zeiterfassung mit SQLite-Backend, Rich-TUI und Excel-Export.
 
+## Mehrere Tage in der Web-GUI erfassen
+
+Über **Mehrere Tage erfassen** im Dashboard oder in der Monatsansicht lässt sich
+ein Zeitraum **von/bis einschließlich** eintragen. Unterstützt werden Arbeit,
+Urlaub, Krank, Gleittag und Dienstreise. Wochenenden und konfigurierte Feiertage
+werden automatisch ausgelassen, auch über Monats- und Jahresgrenzen hinweg.
+
+Für einzelne, nicht zusammenhängende Tage in der Monatsansicht **Mehrere Tage
+auswählen** aktivieren und die gewünschten Checkboxen markieren. Die Checkbox im
+Tabellenkopf wählt alle Arbeitstage des angezeigten Monats. Die Auswahl bleibt
+beim Monatswechsel erhalten. **Ausgewählte Tage erfassen** öffnet den gemeinsamen
+Erfassungsdialog; dort lassen sich einzelne Daten wieder entfernen.
+
+Tagesart und Hinweis gelten für alle ausgewählten Tage. Bei **Arbeit** gelten
+auch Kommen, Gehen und Pause gemeinsam; vorbelegt werden die konfigurierten
+Standardwerte. Die Erfassung unterstützt Arbeitszeiten innerhalb eines Tages.
+Gleittage werden mit den konfigurierten Sollstunden vom Überstundenkonto abgezogen.
+
+Vor dem Speichern zeigt **Vorschau anzeigen** die betroffenen und ausgelassenen
+Tage. Vorhandene Einträge müssen ausdrücklich mit **Vorhandene Einträge
+überschreiben** bestätigt werden. Dabei werden die Tageswerte vollständig
+ersetzt; ein leerer Hinweis entfernt einen vorhandenen Hinweis. Erst **Jetzt
+speichern** schreibt die Auswahl gemeinsam. Abbrechen verändert keine Einträge.
+Ändert sich der Datenbestand zwischen Vorschau und Speichern, ist eine neue
+Vorschau erforderlich. Sind Feiertagsdaten nicht verfügbar, wird nicht gespeichert.
+Die bisherige Einzelbearbeitung bleibt außerhalb des Auswahlmodus unverändert.
+
 ## Quickstart
 
 ```bash

@@ -6,7 +6,11 @@ import requests
 from stamp.db import get_session, Holiday, get_config, get_config_int
 
 
-def fetch_holidays(year: int | None = None) -> list[Holiday]:
+class HolidayUnavailableError(RuntimeError):
+    """Feiertage konnten nicht verlaesslich ermittelt werden."""
+
+
+def fetch_holidays(year: int | None = None, *, strict: bool = False) -> list[Holiday]:
     """Holt Feiertage aus der API oder dem Cache.
 
     Wird nur 1x pro Jahr von der API abgerufen, danach aus SQLite.
@@ -28,8 +32,22 @@ def fetch_holidays(year: int | None = None) -> list[Holiday]:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError) as exc:
+        if strict:
+            raise HolidayUnavailableError(
+                f"Feiertage fuer {year} konnten nicht geladen werden. Bitte erneut versuchen."
+            ) from exc
         return []
+
+    if strict and (
+        not isinstance(data, dict)
+        or not data
+        or any(
+            not isinstance(info, dict) or not isinstance(info.get("datum"), str) or not info["datum"]
+            for info in data.values()
+        )
+    ):
+        raise HolidayUnavailableError(f"Ungueltige Feiertagsdaten fuer {year}. Bitte erneut versuchen.")
 
     holidays = []
     with get_session() as session:
@@ -41,7 +59,14 @@ def fetch_holidays(year: int | None = None) -> list[Holiday]:
             mm_dd = datum_str[5:]  # "2026-01-01" -> "01-01"
             if mm_dd in filter_dates:
                 continue
-            holiday_date = date.fromisoformat(datum_str)
+            try:
+                holiday_date = date.fromisoformat(datum_str)
+            except ValueError as exc:
+                if strict:
+                    raise HolidayUnavailableError(f"Ungueltiges Feiertagsdatum fuer {year}.") from exc
+                raise
+            if strict and holiday_date.year != year:
+                raise HolidayUnavailableError(f"Ungueltiges Feiertagsjahr fuer {year}.")
             holiday = Holiday(date=holiday_date, name=name, year=year)
             session.merge(holiday)
             holidays.append(holiday)

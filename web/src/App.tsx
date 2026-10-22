@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { api, DayInfo, OvertimeData, VacationData, MonthData } from './api/client';
+import { api, ENTRY_TYPES, DayInfo, OvertimeData, VacationData, MonthData } from './api/client';
+import type { BatchResult } from './api/client';
+import BatchEntryModal from './components/BatchEntryModal';
 
 type View = 'dashboard' | 'month' | 'year';
 
@@ -268,14 +270,6 @@ function RowEditModal({ day, onSave, onCancel, onDelete }: {
   const [note, setNote] = useState(s?.note || '');
   const [entryType, setEntryType] = useState(s?.type || 'WORK');
 
-  const typeOptions = [
-    { value: 'WORK', label: '💼 Arbeit' },
-    { value: 'VACATION', label: '🌴 Urlaub' },
-    { value: 'SICK', label: '🤒 Krank' },
-    { value: 'FLEX', label: '⚡ Gleittag' },
-    { value: 'TRAVEL', label: '✈️ Dienstreise' },
-  ];
-
   return (
     <div className="modal-overlay" onClick={onCancel}>
       <div className="modal" onClick={e => e.stopPropagation()}>
@@ -286,7 +280,7 @@ function RowEditModal({ day, onSave, onCancel, onDelete }: {
           <label>
             <span>Typ</span>
             <select value={entryType} onChange={e => setEntryType(e.target.value)}>
-              {typeOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              {ENTRY_TYPES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </label>
           {entryType === 'WORK' && (
@@ -340,23 +334,36 @@ function RowEditModal({ day, onSave, onCancel, onDelete }: {
 }
 
 // ==================== MONTH TABLE ====================
-function MonthTable({ data, onEditDay, onDeleteDay }: {
+function MonthTable({ data, onEditDay, onDeleteDay, selecting, selectedDates, onToggleDate, onToggleMonth }: {
   data: MonthData;
   onEditDay: (date: string, data: Record<string, unknown>) => void;
   onDeleteDay: (date: string) => void;
+  selecting: boolean;
+  selectedDates: Set<string>;
+  onToggleDate: (date: string) => void;
+  onToggleMonth: (dates: string[]) => void;
 }) {
   const [editingDay, setEditingDay] = useState<DayInfo | null>(null);
+  const workdays = data.days.filter(day => !day.is_weekend && !day.is_holiday).map(day => day.date);
 
   return (
     <>
     <div className="card table-card fade-in fade-in-2">
       <div className="card-header">
         <span className="card-title">{MONTHS_FULL[data.month]} {data.year}</span>
-        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Klick auf Zeile zum Bearbeiten</span>
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          {selecting ? 'Arbeitstage auswählen' : 'Klick auf Zeile zum Bearbeiten'}
+        </span>
       </div>
       <table>
         <thead>
           <tr>
+            {selecting && <th>
+              <input type="checkbox" aria-label="Alle Arbeitstage dieses Monats auswählen"
+                     disabled={workdays.length === 0}
+                     checked={workdays.length > 0 && workdays.every(day => selectedDates.has(day))}
+                     onChange={() => onToggleMonth(workdays)} />
+            </th>}
             <th>Datum</th>
             <th>Kommen</th>
             <th>Gehen</th>
@@ -385,8 +392,13 @@ function MonthTable({ data, onEditDay, onDeleteDay }: {
             const badge = s && s.type !== 'WORK' ? typeBadge(s.type) : null;
 
             return (
-              <tr key={d.date} className={`${rowClass} ${clickable ? 'row-clickable' : ''}`}
-                  onClick={clickable ? () => setEditingDay(d) : undefined}>
+              <tr key={d.date} className={`${rowClass} ${clickable ? 'row-clickable' : ''} ${selecting && selectedDates.has(d.date) ? 'row-selected' : ''}`}
+                  onClick={clickable ? () => selecting ? onToggleDate(d.date) : setEditingDay(d) : undefined}>
+                {selecting && <td>
+                  <input type="checkbox" aria-label={`${d.date.split('-').reverse().join('.')} auswählen`}
+                         disabled={!clickable} checked={selectedDates.has(d.date)}
+                         onClick={event => event.stopPropagation()} onChange={() => onToggleDate(d.date)} />
+                </td>}
                 <td>{d.weekday.substring(0, 2)} {fmtDate(d.date)}</td>
                 <td>{s?.type === 'WORK' ? fmtTime(s.stamp_in) : ''}</td>
                 <td>{s?.type === 'WORK' ? fmtTime(s.stamp_out) : ''}</td>
@@ -409,6 +421,7 @@ function MonthTable({ data, onEditDay, onDeleteDay }: {
             );
           })}
           <tr className="sum-row">
+            {selecting && <td></td>}
             <td>Summe</td>
             <td></td><td></td><td></td>
             <td>{data.total_work.toFixed(2)}</td>
@@ -758,6 +771,12 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editModal, setEditModal] = useState(false);
+  const [showBatch, setShowBatch] = useState(false);
+  const [batchDates, setBatchDates] = useState<string[] | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
+  const [batchStatus, setBatchStatus] = useState<string | null>(null);
+  const [batchRefreshError, setBatchRefreshError] = useState<string | null>(null);
 
   const clock = useClock();
   const dateStr = clock.toLocaleDateString('de-DE', {
@@ -931,6 +950,54 @@ export default function App() {
     }
   };
 
+  const clearSelection = () => {
+    setSelectedDates(new Set());
+    setSelecting(false);
+  };
+
+  const toggleDate = (date: string) => {
+    setSelectedDates(previous => {
+      const next = new Set(previous);
+      if (next.has(date)) next.delete(date);
+      else next.add(date);
+      return next;
+    });
+  };
+
+  const toggleMonth = (dates: string[]) => {
+    setSelectedDates(previous => {
+      const next = new Set(previous);
+      const remove = dates.every(date => previous.has(date));
+      dates.forEach(date => { if (remove) next.delete(date); else next.add(date); });
+      return next;
+    });
+  };
+
+  const refreshAfterBatch = async () => {
+    setBatchRefreshError(null);
+    try {
+      const [t, w, ot, vac, month] = await Promise.all([
+        api.getToday(), api.getWeek(), api.getOvertime(), api.getVacation(),
+        view === 'month' ? api.getMonth(selectedMonth) : Promise.resolve(null),
+      ]);
+      setToday(t);
+      setWeekDays(w.days);
+      setWeekTotals({ work: w.total_work, ot: w.total_overtime });
+      setOvertime(ot);
+      setVacation(vac);
+      if (month) setMonthData(month);
+    } catch (err: unknown) {
+      setBatchRefreshError(`Einträge wurden gespeichert, aber die Ansicht konnte nicht aktualisiert werden: ${err instanceof Error ? err.message : 'Unbekannter Fehler'}`);
+    }
+  };
+
+  const handleBatchSaved = (result: BatchResult) => {
+    setShowBatch(false);
+    clearSelection();
+    setBatchStatus(`${result.created} Tage neu erfasst, ${result.replaced} ersetzt, ${result.skipped.length} Wochenend-/Feiertage ausgelassen.`);
+    void refreshAfterBatch();
+  };
+
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const handleImport = async (file: File) => {
     try {
@@ -966,6 +1033,11 @@ export default function App() {
           <div className="logo">stamp<span className="logo-dot"></span></div>
           <div className="header-date">{dateStr}</div>
         </div>
+        <div className="header-actions">
+          <button className="btn btn-accent" onClick={() => { setBatchDates(null); setShowBatch(true); }}>
+            Mehrere Tage erfassen
+          </button>
+        </div>
       </header>
 
       {/* Nav */}
@@ -977,6 +1049,12 @@ export default function App() {
           </button>
         ))}
       </nav>
+
+      {batchStatus && <div className="batch-status" role="status">{batchStatus}</div>}
+      {batchRefreshError && <div className="batch-error" role="alert">
+        {batchRefreshError}
+        <button className="btn" onClick={() => void refreshAfterBatch()}>Ansicht erneut laden</button>
+      </div>}
 
       {loading && <div className="loading-center"><div className="spinner"></div></div>}
 
@@ -1031,6 +1109,21 @@ export default function App() {
       {/* Month View */}
       {!loading && view === 'month' && (
         <>
+          <div className="selection-bar">
+            {!selecting ? (
+              <button className="btn" onClick={() => setSelecting(true)}>Mehrere Tage auswählen</button>
+            ) : (
+              <>
+                <span role="status">{selectedDates.size} Tage ausgewählt</span>
+                <button className="btn btn-accent" disabled={selectedDates.size === 0}
+                        onClick={() => { setBatchDates([...selectedDates].sort()); setShowBatch(true); }}>
+                  Ausgewählte Tage erfassen
+                </button>
+                <button className="btn" disabled={selectedDates.size === 0} onClick={() => setSelectedDates(new Set())}>Auswahl leeren</button>
+                <button className="btn" onClick={clearSelection}>Abbrechen</button>
+              </>
+            )}
+          </div>
           <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
             {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
               <button key={m} className={`nav-btn ${selectedMonth === m ? 'active' : ''}`}
@@ -1041,7 +1134,9 @@ export default function App() {
           </div>
           {monthData && (
             <div className="grid grid-main">
-              <MonthTable data={monthData} onEditDay={handleEditDay} onDeleteDay={handleDeleteDay} />
+              <MonthTable data={monthData} onEditDay={handleEditDay} onDeleteDay={handleDeleteDay}
+                          selecting={selecting} selectedDates={selectedDates}
+                          onToggleDate={toggleDate} onToggleMonth={toggleMonth} />
               <MonthSidebar
                 monthData={monthData}
                 onExport={() => api.exportExcel()}
@@ -1052,6 +1147,9 @@ export default function App() {
           )}
         </>
       )}
+
+      {showBatch && <BatchEntryModal dates={batchDates}
+        onCancel={() => { setShowBatch(false); clearSelection(); }} onSaved={handleBatchSaved} />}
 
       {/* Edit Modal */}
       {editModal && today?.stamp && (

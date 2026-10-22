@@ -3,20 +3,24 @@
 from datetime import date, time, datetime, timedelta
 import calendar
 import shutil
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from stamp import service
 from stamp.db import get_session, Config, Stamp
-from stamp.holidays import is_holiday, get_holidays_for_year
+from stamp.holidays import is_holiday, get_holidays_for_year, HolidayUnavailableError
 from stamp.api.schemas import (
     StampResponse, StampInRequest, StampOutRequest, AbsenceRequest,
     EditRequest, OvertimeResponse, VacationResponse, ConfigEntry, DayInfo,
+    BatchRequest, BatchSaveRequest, BatchPreviewResponse, BatchSaveResponse,
 )
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 WEEKDAYS_DE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
@@ -185,6 +189,43 @@ def api_absence(req: AbsenceRequest):
 
 
 # --- Edit / Cancel ---
+
+def _batch_arguments(req: BatchRequest) -> dict:
+    return {
+        "entry_type": req.type, "start_date": req.start_date, "end_date": req.end_date,
+        "dates": req.dates, "stamp_in_time": req.stamp_in, "stamp_out_time": req.stamp_out,
+        "pause": req.pause, "note": req.note,
+    }
+
+
+def _run_batch(req: BatchRequest):
+    try:
+        arguments = _batch_arguments(req)
+        if isinstance(req, BatchSaveRequest):
+            return service.save_batch(
+                preview_token=req.preview_token, overwrite=req.overwrite, **arguments
+            )
+        return service.preview_batch(**arguments)
+    except service.BatchConflictError as exc:
+        raise HTTPException(409, {"code": "batch_conflict", "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except HolidayUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except SQLAlchemyError as exc:
+        logger.exception("Mehrtageserfassung: Datenbankzugriff fehlgeschlagen")
+        raise HTTPException(503, "Datenbank nicht verfuegbar. Bitte erneut versuchen.") from exc
+
+
+@router.post("/stamps/batch/preview", response_model=BatchPreviewResponse)
+def api_batch_preview(req: BatchRequest):
+    return _run_batch(req)
+
+
+@router.post("/stamps/batch", response_model=BatchSaveResponse)
+def api_batch_save(req: BatchSaveRequest):
+    return _run_batch(req)
+
 
 @router.put("/stamp/{stamp_date}")
 def api_edit(stamp_date: date, req: EditRequest):
